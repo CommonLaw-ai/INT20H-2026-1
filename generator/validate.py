@@ -1,29 +1,53 @@
 """
 validate.py — LLM-as-a-judge validator for generated support chat dialogues.
 
-Checks each dialogue against 4 criteria:
+Checks each dialogue against 2 criteria (MIN_LENGTH is checked in code):
   1. Dialogue is complete (not cut off mid-conversation)
   2. case_type matches the scenario (hidden dissatisfaction is subtle, agent_error has a mistake, etc.)
-  3. Minimum 6 messages
-  4. No placeholder text ([email], #12345, [name], etc.)
+
+Note: placeholder cleanup is handled separately by anonymize.py — not validated here.
 """
 
 import json
 from openai import OpenAI
 
-VALIDATOR_SYSTEM_PROMPT = """You are a strict quality evaluator for support chat dialogues used in an AI training dataset.
+VALIDATOR_SYSTEM_PROMPT = """You are a quality evaluator for support chat dialogues used in an AI training dataset.
 
-Your job is to evaluate whether a generated dialogue meets ALL of the following criteria:
+Your job is to evaluate whether a generated dialogue meets BOTH of the following criteria:
 
-1. COMPLETE — The dialogue has a logical ending. It does not cut off mid-sentence or mid-thought. Both the customer and agent have a closing exchange.
-2. SCENARIO_MATCH — The dialogue accurately reflects the given case_type:
-   - "successful": issue is fully resolved, customer is satisfied.
-   - "agent_error": agent makes at least one clear mistake (wrong info, ignores a question, rude tone).
-   - "problematic": agent fails to resolve the issue, keeps asking the same things or stalls.
-   - "conflictual": genuine emotional tension and conflict between customer and agent.
-   - "hidden dissatisfaction" (described in description): customer formally thanks the agent at the end, but the core issue was never actually solved.
-3. MIN_LENGTH — The dialogue has at least 6 messages total.
-4. NO_PLACEHOLDERS — The dialogue does not contain generic placeholders like [email], [name], [order_number], #12345, example.com, or similar templated text.
+1. COMPLETE — The dialogue has a logical ending. It does not cut off mid-sentence or mid-thought. The conversation reaches a natural conclusion.
+
+2. SCENARIO_MATCH — The dialogue content matches the case_type. Use the definitions below.
+   Each definition includes what PASSES and what FAILS.
+
+   "successful":
+     PASS: Issue is resolved by the end. Customer is satisfied.
+     FAIL: Issue is not resolved, or customer is frustrated.
+
+   "agent_error":
+     PASS: Agent gives wrong information (wrong prices, wrong timelines, wrong policy), OR ignores a direct question, OR provides contradictory answers.
+           The customer may or may not notice the mistake — both are fine.
+           The conversation can still end politely — that does NOT disqualify it.
+     FAIL: Agent is merely unhelpful or slow but does not make a factual mistake.
+     IMPORTANT: An agent saying wrong refund timelines (e.g. "30 days" when it should be less), wrong prices, or incorrect policy IS a clear agent_error. Accept it.
+
+   "problematic":
+     PASS: Agent repeatedly asks for the same information, stalls, or makes no progress toward resolution.
+     FAIL: Agent eventually resolves the issue.
+
+   "conflictual":
+     PASS: Customer shows clear anger, frustration, or hostility. Tension is visible in the dialogue.
+     FAIL: Customer is politely dissatisfied but not emotionally escalated.
+
+   "hidden dissatisfaction":
+     PASS: Customer formally thanks the agent or says "okay" at the end, but the actual problem was never solved (agent gave wrong info, stalled, or avoided the real issue).
+     FAIL: Issue was actually resolved, or customer openly complains at the end.
+
+3. SECURITY — The agent must never request sensitive payment data.
+   FAIL (security violation): agent asks for full card number, CVV/CVC, full PIN, or full password.
+   PASS: agent asks for last 4 digits of card, transaction date, transaction amount, country, merchant name, or a screenshot — these are all allowed.
+
+Be lenient on realistic dialogue elements: polite titles like "Sir" or "ma'am", real-sounding names, order numbers, and phone numbers are all fine — do NOT flag these.
 
 Respond ONLY with a valid JSON object in this exact format:
 {
@@ -47,7 +71,7 @@ def build_validator_prompt(scenario: dict, messages: list[dict]) -> str:
         f"- Description: {scenario['description']}\n\n"
         f"Dialogue ({len(messages)} messages):\n"
         f"{dialogue_text}\n\n"
-        f"Evaluate the dialogue against all 4 criteria and respond with JSON."
+        f"Evaluate the dialogue against all criteria and respond with JSON."
     )
 
 

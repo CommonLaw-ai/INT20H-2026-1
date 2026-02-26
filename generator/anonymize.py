@@ -1,11 +1,17 @@
 """
-anonymize.py — Post-processing service that replaces placeholder emails and phone
-numbers in a generated dialogue dataset with realistic fake values.
+anonymize.py — Post-processing service that cleans up generated dialogue datasets.
+
+Does two things:
+  1. Removes stage directions in parentheses: (pause), (sighs), (checks account), etc.
+  2. Replaces placeholder emails/phones/usernames/account numbers with realistic fake values.
 
 Detects:
-  - Placeholder emails:  [email], [email address], user@example.com, test@test.com, etc.
-  - Placeholder phones:  [phone], [phone number], 555-xxxx, (555) xxx-xxxx, +1-800-xxx-xxxx, etc.
-  - Bare numeric placeholders that look like order/account numbers: #12345, #00000, etc.
+  - Stage directions:     (pause), (sighs), (typing), (checks account), etc.
+  - Placeholder emails:   [email], [email address], user@example.com, test@test.com, etc.
+  - Placeholder phones:   [phone], [phone number], 555-xxxx, (555) xxx-xxxx, +1-800-xxx-xxxx, etc.
+  - Placeholder names:    [username], [name], [customer name], [full name], etc.
+  - Fake order numbers:   #12345, #1234, #00000, #11111, etc.
+  - Fake account numbers: 1234567, 0000000, 1111111 (7-digit sequences of repeating/sequential digits)
 
 Each unique placeholder within a single dialogue gets the same replacement
 (consistent within one conversation), but different dialogues get different values.
@@ -27,9 +33,16 @@ Faker.seed(0)  # reproducible output
 
 # ── Regex patterns ────────────────────────────────────────────────────────────
 
-# Bracket-style placeholders:  [email], [email address], [phone number], etc.
-RE_BRACKET_EMAIL = re.compile(r'\[e-?mail(?:\s+address)?\]', re.IGNORECASE)
-RE_BRACKET_PHONE = re.compile(r'\[phone(?:\s+number)?\]', re.IGNORECASE)
+# Bracket-style placeholders:  [email], [email address], [phone number], [username], [name], etc.
+RE_BRACKET_EMAIL    = re.compile(r'\[e-?mail(?:\s+address)?\]', re.IGNORECASE)
+RE_BRACKET_PHONE    = re.compile(r'\[phone(?:\s+number)?\]', re.IGNORECASE)
+RE_BRACKET_USERNAME = re.compile(r'\[(?:user\s*name|user|customer\s*name|full\s*name|name)\]', re.IGNORECASE)
+
+# Markdown email links: [thull@example.com](mailto:thull@example.com) — replace whole thing with just the fake email
+RE_MARKDOWN_EMAIL = re.compile(
+    r'\[[\w.+-]+@[\w.-]+\]\(mailto:[\w.+-]+@[\w.-]+\)',
+    re.IGNORECASE,
+)
 
 # Generic example/test emails:  anything@example.com, user@test.com, foo@email.com
 RE_GENERIC_EMAIL = re.compile(
@@ -49,6 +62,32 @@ RE_FAKE_PHONE = re.compile(
 # Repeated-digit order numbers that models love to invent: #12345, #1234, #00000, #11111
 RE_FAKE_ORDER = re.compile(r'#(\d)\1{3,}|#1234\b|#12345\b|#98765\b|#00001\b', re.IGNORECASE)
 
+# Fake account numbers: 7-digit sequences of repeating or sequential digits (1234567, 0000000, 1111111)
+RE_FAKE_ACCOUNT = re.compile(r'\b(?:1234567|7654321|0000000|1111111|2222222|3333333|9999999)\b')
+
+# Stage directions in parentheses: (pause), (sighs), (checks account), (long pause), etc.
+# Only matches known action/emotion verbs — avoids stripping legitimate content like (Essential) or (#473829)
+RE_STAGE_DIRECTION = re.compile(
+    r'\s*\(\s*(?:'
+    r'pause|paus\w*|'
+    r'sigh\w*|laugh\w*|chuckl\w*|'
+    r'check\w*|look\w*|review\w*|search\w*|verify\w*|pull\w*|pull up\w*|'
+    r'wait\w*|hold\w*|think\w*|hesitat\w*|'
+    r'nod\w*|shrug\w*|'
+    r'typ\w*|click\w*|scroll\w*|'
+    r'long pause|brief pause|short pause|moment of silence|'
+    r'after a (?:pause|moment)|takes? a (?:deep )?breath'
+    r')[^)]*\)',
+    re.IGNORECASE,
+)
+
+
+# ── Stage direction removal ───────────────────────────────────────────────────
+
+def remove_stage_directions(text: str) -> str:
+    """Remove parenthesized stage directions like (pause), (sighs), (checks account)."""
+    return RE_STAGE_DIRECTION.sub('', text).strip()
+
 
 # ── Replacement helpers ───────────────────────────────────────────────────────
 
@@ -66,15 +105,28 @@ def _fresh_order() -> str:
     return f"#{fake.numerify('######')}"
 
 
+def _fresh_username() -> str:
+    # e.g. "jsmith92" or "mike_jones"
+    return fake.user_name()
+
+
+def _fresh_account() -> str:
+    # e.g. "4829103" — realistic-looking 7-digit account number
+    return fake.numerify('#######')
+
+
 # ── Core substitution ─────────────────────────────────────────────────────────
 
 def _replace_in_text(text: str, memo: dict) -> str:
     """
-    Replace all placeholder emails and phones in a single text string.
+    Clean a single message text:
+      1. Remove stage directions: (pause), (sighs), etc.
+      2. Replace placeholder emails, phones, and order numbers.
 
     memo — shared dict for one dialogue so the same placeholder always maps
            to the same replacement value within the conversation.
     """
+    text = remove_stage_directions(text)
 
     def substitute(pattern: re.Pattern, key_prefix: str, generator) -> callable:
         def replacer(match: re.Match) -> str:
@@ -85,11 +137,14 @@ def _replace_in_text(text: str, memo: dict) -> str:
             return memo[key]
         return replacer
 
-    text = RE_BRACKET_EMAIL.sub(substitute(RE_BRACKET_EMAIL, "email", _fresh_email), text)
-    text = RE_BRACKET_PHONE.sub(substitute(RE_BRACKET_PHONE, "phone", _fresh_phone), text)
-    text = RE_GENERIC_EMAIL.sub(substitute(RE_GENERIC_EMAIL, "email", _fresh_email), text)
-    text = RE_FAKE_PHONE.sub(substitute(RE_FAKE_PHONE, "phone", _fresh_phone), text)
-    text = RE_FAKE_ORDER.sub(substitute(RE_FAKE_ORDER, "order", _fresh_order), text)
+    text = RE_BRACKET_EMAIL.sub(substitute(RE_BRACKET_EMAIL,       "email",    _fresh_email),    text)
+    text = RE_BRACKET_PHONE.sub(substitute(RE_BRACKET_PHONE,       "phone",    _fresh_phone),    text)
+    text = RE_BRACKET_USERNAME.sub(substitute(RE_BRACKET_USERNAME, "username", _fresh_username), text)
+    text = RE_MARKDOWN_EMAIL.sub(substitute(RE_MARKDOWN_EMAIL,     "email",    _fresh_email),    text)
+    text = RE_GENERIC_EMAIL.sub(substitute(RE_GENERIC_EMAIL,       "email",    _fresh_email),    text)
+    text = RE_FAKE_PHONE.sub(substitute(RE_FAKE_PHONE,             "phone",    _fresh_phone),    text)
+    text = RE_FAKE_ORDER.sub(substitute(RE_FAKE_ORDER,             "order",    _fresh_order),    text)
+    text = RE_FAKE_ACCOUNT.sub(substitute(RE_FAKE_ACCOUNT,         "account",  _fresh_account),  text)
 
     return text
 

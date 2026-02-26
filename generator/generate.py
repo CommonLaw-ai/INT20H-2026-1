@@ -15,10 +15,15 @@ import json
 import sys
 from openai import OpenAI
 
+from validate import validate_dialogue
+from actions import classify_action, ACTIONS_LIST
+from anonymize import anonymize_dataset
+
 # ── Configuration ────────────────────────────────────────────────────────────
 
 MODEL = "llama3.1:8b"
-SEED = 42  # For deterministic results
+SEED = 42        # For deterministic results
+MAX_RETRIES = 3  # Max attempts per dialogue if validation fails
 
 # All scenario combinations to cover in the dataset
 SCENARIOS = [
@@ -34,7 +39,7 @@ SCENARIOS = [
     {"topic": "refund",             "case_type": "conflictual", "description": "Customer demands refund angrily after being charged twice; agent uses rude tone and refuses without proper explanation."},
 ]
 
-SYSTEM_PROMPT = """You are a realistic dialogue generator for a support chat dataset.
+SYSTEM_PROMPT = f"""You are a realistic dialogue generator for a support chat dataset.
 Generate a natural, realistic conversation between a Customer and a Support Agent.
 The dialogue must match the given scenario exactly.
 
@@ -48,6 +53,11 @@ Rules:
 - For "agent_error" cases: include at least one clear mistake by the agent
   (wrong information, ignoring a question, unnecessary escalation, or rude tone).
 - For "conflictual" cases: show genuine emotional tension, frustration, and conflict.
+- Do NOT include stage directions, pauses, or actions in parentheses such as (pause), (sighs), (checks account), (long pause), (typing), etc.
+- SECURITY: The agent must NEVER ask for full card number, CVV/CVC, full PIN, or full password.
+  The agent MAY ask for: last 4 digits of card, transaction date, transaction amount, country, merchant name, or a screenshot of an error.
+- The agent must perform exactly one of the following actions during the conversation, naturally woven into the dialogue:
+{ACTIONS_LIST}
 - Output ONLY the dialogue lines, no introductions or commentary.
 """
 
@@ -91,10 +101,8 @@ def check_ollama(client: OpenAI) -> None:
         sys.exit(1)
 
 
-def generate_dialogue(client: OpenAI, scenario: dict, index: int) -> dict:
-    """Call Ollama API and return a structured dialogue entry."""
-    print(f"  Generating dialogue {index + 1}/{len(SCENARIOS)}: [{scenario['case_type']}] {scenario['topic']} ...", end=" ", flush=True)
-
+def _call_llm(client: OpenAI, scenario: dict, attempt: int) -> list[dict]:
+    """Single LLM call for dialogue generation. Uses a different seed per attempt."""
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -102,20 +110,52 @@ def generate_dialogue(client: OpenAI, scenario: dict, index: int) -> dict:
             {"role": "user",   "content": build_user_prompt(scenario)},
         ],
         temperature=0.7,
-        seed=SEED,
-        max_tokens=1024,
+        seed=SEED + attempt,  # different seed per retry for variation
+        max_tokens=2048,
     )
-
     raw_text = response.choices[0].message.content
-    messages = parse_dialogue(raw_text)
+    return parse_dialogue(raw_text)
 
-    print(f"done ({len(messages)} messages)")
 
+def generate_dialogue(client: OpenAI, scenario: dict, index: int) -> dict:
+    """Call Ollama API and return a validated structured dialogue entry."""
+    label = f"[{scenario['case_type']}] {scenario['topic']}"
+    print(f"  Generating dialogue {index + 1}/{len(SCENARIOS)}: {label}")
+
+    last_messages = None
+
+    for attempt in range(MAX_RETRIES):
+        print(f"    Attempt {attempt + 1}/{MAX_RETRIES} ...", end=" ", flush=True)
+
+        messages = _call_llm(client, scenario, attempt)
+        last_messages = messages
+        print(f"generated ({len(messages)} messages), validating ...", end=" ", flush=True)
+
+        valid, reason = validate_dialogue(client, MODEL, scenario, messages)
+
+        if valid:
+            print("OK", end=" ", flush=True)
+            action = classify_action(client, MODEL, messages)
+            print(f"→ action: {action}")
+            return {
+                "id": index + 1,
+                "topic": scenario["topic"],
+                "case_type": scenario["case_type"],
+                "agent_action": action,
+                "messages": messages,
+            }
+        else:
+            print(f"FAILED — {reason}")
+
+    print(f"    WARNING: using best-effort result after {MAX_RETRIES} failed attempts.", end=" ", flush=True)
+    action = classify_action(client, MODEL, last_messages)
+    print(f"→ action: {action}")
     return {
         "id": index + 1,
         "topic": scenario["topic"],
         "case_type": scenario["case_type"],
-        "messages": messages,
+        "agent_action": action,
+        "messages": last_messages,
     }
 
 
@@ -146,7 +186,11 @@ def main():
             dataset.append(entry)
         except Exception as e:
             print(f"ERROR generating dialogue {i + 1}: {e}")
-            sys.exit(1)
+            print(f"  Skipping dialogue {i + 1} and continuing...")
+
+    print("\nCleaning dataset (stage directions, placeholders) ...")
+    dataset, replacements = anonymize_dataset(dataset)
+    print(f"  {replacements} placeholder(s) replaced.")
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(dataset, f, ensure_ascii=False, indent=2)
