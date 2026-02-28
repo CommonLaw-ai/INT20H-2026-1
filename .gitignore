@@ -1,1 +1,7 @@
 .venv/
+AI_TestTask.pdf
+analysis_results.json
+dataset.json
+.env
+.idea/
+__pycache__
