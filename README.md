@@ -160,6 +160,16 @@ Customer: You too!
 ```
 **agent_action:** `info_provided` | **case_type:** `successful`
 
+**Analyzer output:**
+```json
+{
+  "intent": "tariff_question",
+  "satisfaction": "satisfied",
+  "quality_score": 5,
+  "agent_mistakes": []
+}
+```
+
 ---
 
 ### Agent error — `payment_issue`
@@ -181,6 +191,16 @@ Agent:    Okay. This might have been an isolated incident, don't worry about it!
 Customer: I'll make sure of it. Thanks for nothing.
 ```
 **agent_action:** `customer_left` | **case_type:** `agent_error`
+
+**Analyzer output:**
+```json
+{
+  "intent": "payment_issue",
+  "satisfaction": "unsatisfied",
+  "quality_score": 2,
+  "agent_mistakes": ["no_resolution"]
+}
+```
 
 ---
 
