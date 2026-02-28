@@ -15,7 +15,11 @@ VALIDATOR_SYSTEM_PROMPT = """You are a quality evaluator for support chat dialog
 
 Your job is to evaluate whether a generated dialogue meets BOTH of the following criteria:
 
-1. COMPLETE — The dialogue has a logical ending. It does not cut off mid-sentence or mid-thought. The conversation reaches a natural conclusion.
+1. COMPLETE — The dialogue has a logical ending. It does not cut off mid-sentence or mid-thought.
+   The last message must be a closing statement, NOT an open question waiting for a reply.
+   Even conflictual or problematic dialogues must end naturally — the customer says a final frustrated
+   line, or the agent gives a final (even unhelpful) closing statement. A dialogue that ends
+   mid-question with no reply is NOT complete.
 
 2. SCENARIO_MATCH — The dialogue content matches the case_type. Use the definitions below.
    Each definition includes what PASSES and what FAILS.
@@ -88,9 +92,14 @@ def validate_dialogue(client: OpenAI, model: str, scenario: dict, messages: list
     Returns:
         (valid: bool, reason: str)
     """
-    # Fast pre-check: minimum length before calling LLM
+    # Fast pre-checks before calling LLM
     if len(messages) < 6:
         return False, f"Too short: only {len(messages)} messages (minimum 6 required)"
+
+    # Last message must not be an open question (ends with "?" with no reply after)
+    last = messages[-1]
+    if last["text"].strip().endswith("?"):
+        return False, f"Dialogue ends on an unanswered question ({last['role']}): \"{last['text'][:80]}\""
 
     response = client.chat.completions.create(
         model=model,

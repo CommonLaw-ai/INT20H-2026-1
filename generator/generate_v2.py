@@ -1,12 +1,12 @@
 """
-generate.py — Generates a dataset of support chat dialogues using Llama 3.1 8B via Ollama.
+generate_v2.py — Generates a dataset of support chat dialogues using Llama 3.1 8B via Ollama.
 
 Usage:
-    python generate.py --output dataset.json
-    python generate.py --output dataset.json --count 20
-    python generate.py --output dataset.json --policy company_policy.txt
-    python generate.py --output dataset.json --topics payment_issue,refund --case-types successful,conflictual
-    python generate.py --output dataset.json --count 30 --vary-descriptions
+    python generate_v2.py --output dataset.json
+    python generate_v2.py --output dataset.json --count 20
+    python generate_v2.py --output dataset.json --policy company_policy.txt
+    python generate_v2.py --output dataset.json --topics payment_issue,refund --case-types successful,conflictual
+    python generate_v2.py --output dataset.json --count 30 --vary-descriptions
 
 Requirements:
     Ollama must be running locally: https://ollama.com
@@ -30,6 +30,7 @@ from anonymize import anonymize_dataset
 MODEL = "llama3.1:8b"
 SEED = 42
 MAX_RETRIES = 3
+RETRY_TEMPERATURES = [0.7, 0.9, 1.1]  # one per attempt — higher = more varied on retry
 
 # Support escalation contacts
 SUPPORT_EMAIL = "support@company.com"
@@ -209,6 +210,9 @@ ACTIONS:
 
 - Do NOT include stage directions, pauses, or actions in parentheses such as (pause), (sighs),
   (checks account), (long pause), (typing), etc.
+- The conversation must end with a natural closing exchange — the last message must be a final
+  statement or goodbye, NOT an open question waiting for a reply. Even frustrated customers
+  must have a closing line (e.g. "Fine, whatever." or "I'll take this elsewhere.").
 - Output ONLY the dialogue lines, no introductions or commentary.
 """
 
@@ -233,6 +237,8 @@ def parse_dialogue(raw_text: str) -> list[dict]:
             messages.append({"role": "customer", "text": line[len("Customer:"):].strip()})
         elif line.startswith("Agent:"):
             messages.append({"role": "agent", "text": line[len("Agent:"):].strip()})
+    if messages:
+        messages[-1]["is_last"] = True
     return messages
 
 
@@ -261,8 +267,8 @@ def _call_llm(client: OpenAI, scenario: dict, attempt: int, system_prompt: str) 
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": build_user_prompt(scenario)},
         ],
-        temperature=0.7,
-        seed=SEED + attempt,
+        temperature=RETRY_TEMPERATURES[attempt],
+        seed=SEED,
         max_tokens=2048,
     )
     return parse_dialogue(response.choices[0].message.content)
@@ -321,7 +327,7 @@ def main():
     default_count = len(TOPICS) * len(CASE_TYPES)
 
     parser = argparse.ArgumentParser(
-        description="Generate support chat dataset using Llama 3.1 8B via Ollama.",
+        description="Generate a support chat dataset using Llama 3.1 8B via Ollama.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Available topics:
@@ -332,16 +338,16 @@ Available case types:
 
 Examples:
   # All combinations (default: {default_count} dialogues)
-  python generate.py --output dataset.json
+  python generate_v2.py --output dataset.json
 
   # 30 dialogues — pairs repeat with fresh LLM descriptions each time
-  python generate.py --output dataset.json --count 30 --vary-descriptions
+  python generate_v2.py --output dataset.json --count 30 --vary-descriptions
 
   # Only specific topics and case types
-  python generate.py --topics payment_issue,refund --case-types successful,conflictual
+  python generate_v2.py --topics payment_issue,refund --case-types successful,conflictual
 
   # With a company policy document
-  python generate.py --policy company_policy.txt
+  python generate_v2.py --policy company_policy.txt
 """,
     )
     parser.add_argument("--output",  default="dataset.json",

@@ -7,7 +7,7 @@ Does two things:
 
 Detects:
   - Stage directions:     (pause), (sighs), (typing), (checks account), etc.
-  - Placeholder emails:   [email], [email address], user@example.com, test@test.com, etc.
+  - Placeholder emails:   [email], [email address], [customer email], [user@company.com], user@example.com, etc.
   - Placeholder phones:   [phone], [phone number], 555-xxxx, (555) xxx-xxxx, +1-800-xxx-xxxx, etc.
   - Placeholder names:    [username], [name], [customer name], [full name], etc.
   - Fake order numbers:   #12345, #1234, #00000, #11111, etc.
@@ -33,14 +33,26 @@ Faker.seed(0)  # reproducible output
 
 # ── Regex patterns ────────────────────────────────────────────────────────────
 
-# Bracket-style placeholders:  [email], [email address], [phone number], [username], [name], etc.
-RE_BRACKET_EMAIL    = re.compile(r'\[e-?mail(?:\s+address)?\]', re.IGNORECASE)
+# Bracket-style placeholders:  [email], [email address], [customer email], [support@company.com], [phone number], [username], [name], etc.
+RE_BRACKET_EMAIL    = re.compile(r'\[(?:e-?mail(?:\s+address)?|customer\s*e-?mail|[\w.+-]+@[\w.-]+)\]', re.IGNORECASE)
 RE_BRACKET_PHONE    = re.compile(r'\[phone(?:\s+number)?\]', re.IGNORECASE)
 RE_BRACKET_USERNAME = re.compile(r'\[(?:user\s*name|user|customer\s*name|full\s*name|name)\]', re.IGNORECASE)
 
 # Markdown email links: [thull@example.com](mailto:thull@example.com) — replace whole thing with just the fake email
 RE_MARKDOWN_EMAIL = re.compile(
     r'\[[\w.+-]+@[\w.-]+\]\(mailto:[\w.+-]+@[\w.-]+\)',
+    re.IGNORECASE,
+)
+
+# Markdown URL links with example/placeholder domains: [click here](https://example.com/link)
+RE_MARKDOWN_URL = re.compile(
+    r'\[([^\]]+)\]\(https?://(?:example|test|placeholder|sample)\.(?:com|org|net)[^\)]*\)',
+    re.IGNORECASE,
+)
+
+# Bare URLs with example/placeholder domains: https://example.com/anything
+RE_EXAMPLE_URL = re.compile(
+    r'https?://(?:example|test|placeholder|sample)\.(?:com|org|net)\S*',
     re.IGNORECASE,
 )
 
@@ -105,6 +117,12 @@ def _fresh_order() -> str:
     return f"#{fake.numerify('######')}"
 
 
+def _fresh_url() -> str:
+    # e.g. "https://support.acme-corp.com/help/billing"
+    slug = fake.slug()
+    return f"https://support.{fake.domain_name()}/{slug}"
+
+
 def _fresh_username() -> str:
     # e.g. "jsmith92" or "mike_jones"
     return fake.user_name()
@@ -141,6 +159,8 @@ def _replace_in_text(text: str, memo: dict) -> str:
     text = RE_BRACKET_PHONE.sub(substitute(RE_BRACKET_PHONE,       "phone",    _fresh_phone),    text)
     text = RE_BRACKET_USERNAME.sub(substitute(RE_BRACKET_USERNAME, "username", _fresh_username), text)
     text = RE_MARKDOWN_EMAIL.sub(substitute(RE_MARKDOWN_EMAIL,     "email",    _fresh_email),    text)
+    text = RE_MARKDOWN_URL.sub(lambda m: m.group(1), text)   # [text](https://example.com) → text
+    text = RE_EXAMPLE_URL.sub(substitute(RE_EXAMPLE_URL,           "url",      _fresh_url),      text)
     text = RE_GENERIC_EMAIL.sub(substitute(RE_GENERIC_EMAIL,       "email",    _fresh_email),    text)
     text = RE_FAKE_PHONE.sub(substitute(RE_FAKE_PHONE,             "phone",    _fresh_phone),    text)
     text = RE_FAKE_ORDER.sub(substitute(RE_FAKE_ORDER,             "order",    _fresh_order),    text)
@@ -158,18 +178,11 @@ def anonymize_dialogue(dialogue: dict) -> tuple[dict, int]:
     """
     result = copy.deepcopy(dialogue)
     memo: dict = {}
-    count = 0
 
     for message in result.get("messages", []):
-        original = message["text"]
-        replaced = _replace_in_text(original, memo)
-        if replaced != original:
-            count += len(re.findall(r'\S+', replaced)) - len(re.findall(r'\S+', original)) + 1
-            # simpler: just count memo keys added during this message
-        message["text"] = replaced
+        message["text"] = _replace_in_text(message["text"], memo)
 
-    count = len(memo)  # number of unique placeholders replaced in this dialogue
-    return result, count
+    return result, len(memo)
 
 
 def anonymize_dataset(dataset: list[dict]) -> tuple[list[dict], int]:
