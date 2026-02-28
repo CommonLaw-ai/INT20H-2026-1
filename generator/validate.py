@@ -1,9 +1,10 @@
 """
 validate.py — LLM-as-a-judge validator for generated support chat dialogues.
 
-Checks each dialogue against 2 criteria (MIN_LENGTH is checked in code):
+Checks each dialogue against 3 criteria (MIN_LENGTH is checked in code):
   1. Dialogue is complete (not cut off mid-conversation)
   2. case_type matches the scenario (hidden dissatisfaction is subtle, agent_error has a mistake, etc.)
+  3. Security — agent never requests sensitive payment data (CVV, full card number, full PIN)
 
 Note: placeholder cleanup is handled separately by anonymize.py — not validated here.
 """
